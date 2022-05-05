@@ -3,6 +3,8 @@ package deepl
 import (
 	"fmt"
 	"github.com/go-resty/resty/v2"
+	"github.com/tdewolff/minify/v2"
+	"github.com/tdewolff/minify/v2/html"
 )
 
 const (
@@ -67,12 +69,15 @@ const (
 	FormalityLess          = "less"
 	TagHandlingXML         = "xml"
 	TagHandlingHTML        = "html"
+
+	MinifyHTML     = true
+	DontMinifyHTML = false
 )
 
 type TranslationResponse struct {
-	Translations []Translations `json:"translations"`
+	Translations []TranslationResponseTranslations `json:"translations"`
 }
-type Translations struct {
+type TranslationResponseTranslations struct {
 	DetectedSourceLanguage string `json:"detected_source_language"`
 	Text                   string `json:"text"`
 }
@@ -86,13 +91,117 @@ type ErrorResponse struct {
 	Message string `json:"message"`
 }
 
-var client = resty.New()
-var apiBaseURL = "https://api-free.deepl.com/v2"
+type Translation struct {
+	Texts     []string `json:"texts"`
+	Source    string   `json:"source"`
+	Target    string   `json:"target"`
+	SplitSent string   `json:"split_sentences"`
+	Preserve  string   `json:"preserve_formatting"`
+	Formality string   `json:"formality"`
+}
 
-func GetUsage() {
-	resp, err := client.R().SetResult(&UsageResponse{}).Get(fmt.Sprintf("%s/usage", apiBaseURL))
-	if err != nil {
-		panic(err)
+type DeepL struct {
+	ApiKey     string
+	ApiBaseURL string
+	Minifier   *minify.M
+}
+
+func NewClient(apiKey string) *DeepL {
+
+	minifier := minify.New()
+	minifier.AddFunc("text/html", html.Minify)
+
+	return &DeepL{
+		ApiKey:     apiKey,
+		ApiBaseURL: "https://api.deepl.com/v2",
+		Minifier:   minifier,
 	}
-	fmt.Printf("%+v\n", resp.Result().(*UsageResponse))
+}
+
+func (dl *DeepL) GetUsage() (UsageResponse, error) {
+	var client = resty.New()
+	resp, err := client.R().
+		SetResult(&UsageResponse{}).
+		SetAuthScheme("DeepL-Auth-Key").
+		SetAuthToken(dl.ApiKey).
+		Get(fmt.Sprintf("%s/usage", dl.ApiBaseURL))
+	if err != nil {
+		return UsageResponse{}, err
+	}
+	usage := resp.Result().(*UsageResponse)
+	return *usage, nil
+}
+
+func (dl *DeepL) Translate(text, sourceLanguage, targetLanguage string) (translation Translation, err error) {
+	splitSentencesOrNot := DontSplitSentences
+	preserveFormattingOrNot := PreserveFormatting
+	formalityLevel := FormalityMore
+	resp, err := dl.translate(text, sourceLanguage, targetLanguage, splitSentencesOrNot, preserveFormattingOrNot, formalityLevel, MinifyHTML)
+	if err != nil {
+		return Translation{}, err
+	}
+
+	translation.Source = sourceLanguage
+	translation.Target = targetLanguage
+	translation.SplitSent = splitSentencesOrNot
+	translation.Preserve = preserveFormattingOrNot
+	translation.Formality = formalityLevel
+
+	for _, t := range resp.Translations {
+		translation.Texts = append(translation.Texts, t.Text)
+	}
+
+	return translation, nil
+}
+
+func (dl *DeepL) translate(text, sourceLanguage, targetLanguage, splitSentences, preserveFormatting, formality string, minifyHTML bool) (translations *TranslationResponse, err error) {
+	if minifyHTML {
+		text, err = dl.Minifier.String("text/html", text)
+		if err != nil {
+			return translations, fmt.Errorf("failed to minify text: %s", err)
+		}
+	}
+
+	//if len(text) > 1024 {
+	//	return translations, fmt.Errorf("text is too long, the DeepL API has a maximum of 1024 characters per request")
+	//}
+
+	var client = resty.New()
+	//resp, err := client.R().
+	//	SetResult(&TranslationResponse{}).
+	//	SetAuthScheme("DeepL-Auth-Key").
+	//	SetAuthToken(dl.ApiKey).
+	//	SetQueryParams(map[string]string{
+	//		"text":                    text,
+	//		"source_lang":             sourceLanguage,
+	//		"target_lang":             targetLanguage,
+	//		"split_sentences":         splitSentences,
+	//		"preserve_formatting":     preserveFormatting,
+	//		"formality":               formality,
+	//		"ignore_unsupported_lang": "true",
+	//		"tag_handling":            TagHandlingHTML,
+	//	}).
+	//	Get(fmt.Sprintf("%s/translate", dl.ApiBaseURL))
+
+	resp, err := client.R().
+		SetResult(&TranslationResponse{}).
+		SetAuthScheme("DeepL-Auth-Key").
+		SetAuthToken(dl.ApiKey).
+		SetFormData(map[string]string{
+			"text":                    text,
+			"source_lang":             sourceLanguage,
+			"target_lang":             targetLanguage,
+			"split_sentences":         splitSentences,
+			"preserve_formatting":     preserveFormatting,
+			"formality":               formality,
+			"ignore_unsupported_lang": "true",
+			"tag_handling":            TagHandlingHTML,
+		}).
+		Post(fmt.Sprintf("%s/translate", dl.ApiBaseURL))
+
+	if err != nil {
+		return translations, fmt.Errorf("failed to translate text: %s", err)
+	}
+	translations = resp.Result().(*TranslationResponse)
+	return translations, nil
 }
